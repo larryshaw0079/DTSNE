@@ -1,17 +1,15 @@
 """
 Author: Bill Wang
 """
-import warnings
 import argparse
-import datetime
-import platform
-from rdp_tree import RDPTree
-import shutil
 import os
-import sys
-from util import dataLoading, random_list, tic_time
-import time
+import shutil
+import warnings
+
 import torch
+
+from rdp_tree import RDPTree
+from util import dataLoading, random_list, tic_time
 
 
 def arg_parse(verbose=True):
@@ -28,9 +26,15 @@ def arg_parse(verbose=True):
     parser.add_argument('--lr', dest='LR', type=float, default=1e-1)
     parser.add_argument('--tree-depth', dest='tree_depth', type=int, default=8)
     parser.add_argument('--forest-Tnum', dest='forest_Tnum', type=int, default=30)
-    parser.add_argument('--filter-ratio', dest='filter_ratio', type=float, default=0.05)  # filter those with high anomaly scores
+    parser.add_argument('--filter-ratio', dest='filter_ratio', type=float,
+                        default=0.05)  # filter those with high anomaly scores
     parser.add_argument('--dropout-r', dest='dropout_r', type=float, default=0.1)
-    parser.add_argument('--random-size', dest='random_size', type=int, default=10000)  # randomly choose 1024 size of data for training
+    parser.add_argument('--random-size', dest='random_size', type=int,
+                        default=10000)  # randomly choose 1024 size of data for training
+    parser.add_argument('--use-pairwise', dest='use_pairwise', action='store_true')
+    parser.add_argument('--use-momentum', dest='use_momentum', action='store_true')
+    parser.add_argument('--criterion', dest='criterion', type=str, default='distance',
+                        choices=['distance', 'lof', 'iforest'])
 
     args_parsed = parser.parse_args()
 
@@ -152,6 +156,9 @@ if __name__ == "__main__":
             logfile=logfile,
             dropout_r=args.dropout_r,
             svm_flag=svm_flag,
+            use_pairwise=args.use_pairwise,
+            use_momentum=args.use_momentum,
+            criterion=args.criterion
         )
 
         print("tree id:", i, "tic time end.")

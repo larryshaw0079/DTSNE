@@ -4,11 +4,11 @@ Author: Bill Wang
 RDP Tree class for filter normal samples
 """
 
+import random
+
+import numpy as np
 
 from model import RDP_Model
-import numpy as np
-import random
-import os
 from util import random_list, aucPerformance
 
 is_batch_replace = True
@@ -20,7 +20,8 @@ class RDPTree():
     def __init__(self,
                  t_id,
                  tree_depth,
-                 filter_ratio=0.1):
+                 filter_ratio=0.1
+                 ):
 
         self.t_id = t_id
         self.tree_depth = tree_depth
@@ -42,6 +43,9 @@ class RDPTree():
                          logfile=None,
                          dropout_r=0.1,
                          svm_flag=False,
+                         use_pairwise=True,
+                         use_momentum=False,
+                         criterion='iforest'
                          ):
         if svm_flag:
             x_ori = x.toarray()
@@ -66,7 +70,8 @@ class RDPTree():
                     random.shuffle(batch_x)
                     batch_cnt = 0
                     for batch_i in batch_x:
-                        gap_loss = model.train_model(batch_i, epoch)
+                        gap_loss = model.train_model(batch_i, epoch, use_pairwise=use_pairwise,
+                                                     use_momentum=use_momentum)
                         # print("epoch ", epoch, "loss: ", loss)
                         batch_cnt += 1
                         if batch_cnt >= node_batch:
@@ -77,7 +82,8 @@ class RDPTree():
                     for batch_i in range(node_batch):
                         random_pos = random_list(0, x.shape[0] - 1, batch_size)
                         batch_data = x[random_pos]
-                        gap_loss = model.train_model(batch_data, epoch)
+                        gap_loss = model.train_model(batch_data, epoch, use_pairwise=use_pairwise,
+                                                     use_momentum=use_momentum)
 
                 if epoch % eval_interval == 0:
                     # print("epoch ", epoch, "gap_loss:", gap_loss, " recon_loss:", recon_loss)
@@ -95,7 +101,7 @@ class RDPTree():
                         logfile.write("epoch " + str(epoch) + " gap_loss: " + str(gap_loss) + '\n')
                     model.save_model(save_path + 't' + str(self.t_id) + '_l' + str(level) + '_latest.h5')
 
-                    scores = model.eval_model(x)
+                    scores = model.eval_model(x, criterion=criterion)
 
                     # eval
                     if is_eval:
@@ -140,6 +146,7 @@ class RDPTree():
                         dropout_r,
                         testing_method='last_layer',
                         svm_flag=False,
+                        criterion='distance'
                         ):
 
         if svm_flag:
@@ -164,7 +171,7 @@ class RDPTree():
                 model.load_model(load_path + 't' + str(self.t_id) + '_l' + str(level) + '_latest.h5')
 
             # eval
-            scores = model.eval_model(x)
+            scores = model.eval_model(x, criterion=criterion)
 
             if level == 1:
                 first_level_scores = scores
