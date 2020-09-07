@@ -236,6 +236,7 @@ class RDP_Model:
         loss = gap_loss
 
         if use_pairwise:
+            # print('[INFO] Calculating pairwise loss...')
             r_target_random = self.r_target_net(x_random).detach()
             r_pred_random = self.r_net(x_random)
 
@@ -251,6 +252,7 @@ class RDP_Model:
         self.r_net_optim.step()
 
         if use_momentum:
+            # print('[INFO] Calculating moving momentum...')
             self.moving_update()
 
         return gap_loss.data.cpu().numpy()
@@ -261,6 +263,7 @@ class RDP_Model:
         np.random.shuffle(x_random)
 
         if criterion == 'distance':
+            print('[INFO] Using criterion distance...')
             x = torch.FloatTensor(x)
             x_random = torch.FloatTensor(x_random)
 
@@ -281,6 +284,7 @@ class RDP_Model:
             scores = gap_loss + pair_wise_loss
             return scores.data.cpu().numpy()
         elif criterion == 'lof':
+            print('[INFO] Using criterion LOF...')
             x = torch.FloatTensor(x)
             if self.USE_GPU:
                 x = x.cuda()
@@ -295,6 +299,7 @@ class RDP_Model:
 
             return scores
         elif criterion == 'iforest':
+            print('[INFO] Using criterion iForest...')
             x = torch.FloatTensor(x)
             if self.USE_GPU:
                 x = x.cuda()
