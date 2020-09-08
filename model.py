@@ -3,6 +3,7 @@ Author: Bill Wang
 """
 
 import copy
+import itertools
 import math
 
 import numpy as np
@@ -176,6 +177,7 @@ class RDP_Model:
         # self.r_target_net = RNet(in_c, out_c, dropout_r)
         # self.projection = MLP(out_c, out_c)
         self.r_net = RNet(in_c, out_c, dropout_r)
+        self.r_net_projection = MLP(out_c, out_c)
         self.USE_GPU = USE_GPU
         self.LR = LR
         self.logfile = logfile
@@ -200,7 +202,8 @@ class RDP_Model:
         # self.r_net_optim = torch.optim.Adam(self.r_net.parameters(), lr=LR)
         # self.r_net_optim = torch.optim.SGD(
         #     [{'params': self.r_net.parameters()}, {'params': self.projection.parameters()}], lr=LR, momentum=0.9)
-        self.r_net_optim = torch.optim.SGD(self.r_net.parameters(), lr=LR, momentum=0.9)
+        self.r_net_optim = torch.optim.SGD(itertools.chain(self.r_net.parameters(), self.r_net_projection.parameters()),
+                                           lr=LR, momentum=0.9)
 
         self.epoch = 0
 
