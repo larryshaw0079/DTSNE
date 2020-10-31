@@ -1,48 +1,64 @@
 """
-Author: Bill Wang
+@Time    : 2020/10/27 15:55
+@Author  : Xiao Qinfeng
+@Email   : qfxiao@bjtu.edu.cn
+@File    : main.py.py
+@Software: PyCharm
+@Desc    : 
 """
+
 import argparse
-import os
-import pdb
-import shutil
+import multiprocessing
 import warnings
+from multiprocessing import Pool
 
-import torch
+# import wandb
 import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.model_selection import train_test_split
+from torch.utils.data import TensorDataset, DataLoader
 
-from sklearn.model_selection import KFold
+from dtsne.backbone import TeacherNet, StudentNet
+from dtsne.dataset import load_data, BatchTransformation
+from dtsne.util import replaced_sampling
 
-from rdp_tree import RDPTree
-from util import dataLoading, aucPerformance, random_list, tic_time
+
+# from torch.utils.tensorboard import SummaryWriter
 
 
-def arg_parse(verbose=True):
+def parse_args(verbose=True):
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--data-path', dest='data_path', type=str, default="data/apascal.csv")
-    parser.add_argument('--save-path', dest='save_path', type=str, default="save_model/")
-    parser.add_argument('--load-path', dest='load_path', type=str, default="save_model/")
-    parser.add_argument('--log-path', dest='log_path', type=str, default="logs/log.log")
-    parser.add_argument('--node-batch', dest='node_batch', type=int, default=30)
-    parser.add_argument('--node-epoch', dest='node_epoch', type=int, default=200)  # epoch for a node training
-    parser.add_argument('--eval-interval', dest='eval_interval', type=int, default=24)
-    parser.add_argument('--batch-size', dest='batch_size', type=int, default=192)
-    parser.add_argument('--out-c', dest='out_c', type=int, default=50)
-    parser.add_argument('--lr', dest='LR', type=float, default=1e-1)
-    parser.add_argument('--tree-depth', dest='tree_depth', type=int, default=8)
-    # parser.add_argument('--forest-Tnum', dest='forest_Tnum', type=int, default=30)
-    parser.add_argument('--filter-ratio', dest='filter_ratio', type=float,
-                        default=0.05)  # filter those with high anomaly scores
-    parser.add_argument('--dropout-r', dest='dropout_r', type=float, default=0.1)
-    # parser.add_argument('--random-size', dest='random_size', type=int,
-    #                     default=10000)  # randomly choose 1024 size of data for training
-    parser.add_argument('--num-fold', dest='num_fold', type=int, default=10)
-    parser.add_argument('--use-pairwise', dest='use_pairwise', action='store_true')
-    parser.add_argument('--use-momentum', dest='use_momentum', action='store_true')
-    parser.add_argument('--criterion', dest='criterion', type=str, default='distance',
-                        choices=['distance', 'lof', 'iforest'])
-    parser.add_argument('--method', dest='testing_method', type=str, default='last_layer',
-                        choices=['last_layer', 'first_layer', 'level'])
+    parser.add_argument('--data-path', type=str, default='./data/apascal.csv')
+    parser.add_argument('--world-size', type=int, default=4)
+    parser.add_argument('--seed', type=int, default=2020)
+    parser.add_argument('--num-students', type=int, default=8)
+    parser.add_argument('--num-trans', type=int, default=32)
+    parser.add_argument('--boost-iter', type=int, default=8)
+    parser.add_argument('--boost-ratio', type=float, default=0.05)
+
+    parser.add_argument('--num-trial', type=int, default=10)
+    parser.add_argument('--train-ratio', type=float, default=0.7)
+    parser.add_argument('--feature-dim', type=int, default=32)
+
+    parser.add_argument('--pretrain', action='store_true')
+    parser.add_argument('--replaced-sampling', action='store_true')
+    parser.add_argument('--sampling-size', type=int, default=None)
+
+    parser.add_argument('--optim', type=str, default='sgd')
+    parser.add_argument('--pretrain-lr', type=float, default=1e-3)
+    parser.add_argument('--pretrain-epochs', type=int, default=100)
+    parser.add_argument('--train-epochs', type=int, default=200)
+    parser.add_argument('--disp-interval', type=int, default=20)
+    parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=1e-1)
+    parser.add_argument('--momentum', type=float, default=0.9)
+    parser.add_argument('--lam', type=float, default=1.0)
 
     args_parsed = parser.parse_args()
 
@@ -61,112 +77,313 @@ def arg_parse(verbose=True):
     return args_parsed
 
 
-def train():
-    pass
+def pretrain(run_id, teacher_net, train_loader, device, args):
+    if args.optim == 'adam':
+        teacher_optim = optim.Adam(teacher_net.parameters(), lr=args.pretrain_lr)
+    elif args.optim == 'sgd':
+        teacher_optim = optim.SGD(teacher_net.parameters(), lr=args.pretrain_lr, momentum=args.momentum)
+    else:
+        raise ValueError
+    transformer = BatchTransformation(input_size=train_loader.dataset[0][0].size(-1),
+                                      output_size=train_loader.dataset[0][0].size(-1),
+                                      batch_size=args.batch_size, num_trans=args.num_trans,
+                                      bias=False, device=device)
+    criterion = nn.CrossEntropyLoss()
+
+    teacher_net.train()
+    for epoch in range(args.pretrain_epochs):
+        losses = []
+        for x, y in train_loader:
+            x, y = x.to(device), y.to(device)
+
+            x, y = transformer(x)
+            y_hat = teacher_net(x)
+
+            teacher_optim.zero_grad()
+            loss = criterion(y_hat, y)
+            loss.backward()
+            teacher_optim.step()
+
+            losses.append(loss.item())
+
+        if (epoch + 1) % args.disp_interval == 0:
+            print(
+                f'[INFO] Process {run_id}. Epoch [{epoch + 1}/{args.pretrain_epochs}]: pretrain loss {np.mean(losses):.6f}')
 
 
-def test():
-    pass
-
-
-class ClassBalancedSplit:
-    def __init__(self, n_split):
-        self.n_split = n_split
-
-    def split(self, X, y):
-        assert X.shape[0] == y.shape[0]
-        if len(y[y==0]) < self.n_split:
-            raise ValueError(f'The instance number of class {0} is not enough!')
-        if len(y[y==1]) < self.n_split:
-            raise ValueError(f'The instance number of class {1} is not enough!')
-
-        class_0_inds = np.arange(len(y))[y == 0]
-        class_1_inds = np.arange(len(y))[y == 1]
-
-        np.random.shuffle(class_0_inds)
-        np.random.shuffle(class_1_inds)
-
-        seg_0_len = len(class_0_inds) // self.n_split
-        seg_1_len = len(class_1_inds) // self.n_split
-
-        for i in range(self.n_split):
-            yield np.concatenate([class_0_inds[:seg_0_len], class_1_inds[:seg_1_len]]), np.concatenate([class_0_inds[seg_0_len:], class_1_inds[seg_1_len:]])
-            class_0_inds = np.roll(class_0_inds, shift=seg_0_len)
-            class_1_inds = np.roll(class_1_inds, shift=seg_1_len)
-
-
-if __name__ == "__main__":
-    USE_GPU = torch.cuda.is_available()
-
-    args = arg_parse()
-    logfile = open(args.log_path, 'w')
-
-    x_ori, labels_ori = dataLoading(args.data_path, logfile)
-    labels_ori = labels_ori.values.reshape(-1, 1)
-    data_size = labels_ori.size
-
-    rocs = []
-    aps = []
-    kf = ClassBalancedSplit(n_split=args.num_fold)
-    for i, (train_index, test_index) in enumerate(kf.split(x_ori, labels_ori.reshape(-1))):
-        if not os.path.exists(args.save_path):
-            warnings.warn(f'The path {args.save_path} does not exist, created.')
-            os.makedirs(args.save_path)
+def train(run_id, teacher_net, student_nets, train_loader, device, args):
+    student_optims = []
+    for i in range(args.num_students):
+        if args.optim == 'adam':
+            student_optims.append(optim.Adam(student_nets[i].parameters(), lr=args.lr))
+        elif args.optim == 'sgd':
+            student_optims.append(optim.SGD(student_nets[i].parameters(), lr=args.lr,
+                                            momentum=args.momentum))
         else:
-            warnings.warn(f'The path {args.save_path} already existed, deleted.')
-            shutil.rmtree(args.save_path)
-            os.mkdir(args.save_path)
+            raise ValueError
 
-        x_train, x_test = x_ori[train_index], x_ori[test_index]
-        y_train, y_test = labels_ori[train_index], labels_ori[test_index]
+    mse = nn.MSELoss()
 
-        rdp = RDPTree(t_id=i + 1, tree_depth=args.tree_depth, filter_ratio=args.filter_ratio)
+    teacher_net.eval()
+    for i in range(args.num_students):
+        student_nets[i].train()
 
-        rdp.training_process(
-            x=x_train,
-            labels=y_train,
-            batch_size=args.batch_size,
-            node_batch=args.node_batch,
-            node_epoch=args.node_epoch,
-            eval_interval=args.eval_interval,
-            out_c=args.out_c,
-            USE_GPU=USE_GPU,
-            LR=args.LR,
-            save_path=args.save_path,
-            logfile=logfile,
-            dropout_r=args.dropout_r,
-            svm_flag=False,
-            use_pairwise=args.use_pairwise,
-            use_momentum=args.use_momentum,
-            criterion=args.criterion
-        )
+    for epoch in range(args.train_epochs):
+        direct_dis_list = []
+        pairwise_dis_list = []
+        for x, y in train_loader:
+            x, y = x.to(device), y.to(device)
 
-        x_level, first_level_scores = rdp.testing_process(
-            x=x_test,
-            out_c=args.out_c,
-            USE_GPU=USE_GPU,
-            load_path=args.load_path,
-            dropout_r=args.dropout_r,
-            testing_method=args.testing_method,
-            svm_flag=False,
-            criterion=args.criterion
-        )
+            with torch.no_grad():
+                target = teacher_net(x)
 
-        if args.testing_method == 'level':
-            scores = x_level
+            current_direct_dis = []
+            current_pairwise_dis = []
+            for i in range(args.num_students):
+                if args.replaced_sampling:
+                    with torch.no_grad():
+                        target = teacher_net(x[:, i, :].squeeze(1))
+                    out = student_nets[i](x[:, i, :].squeeze(1))
+                else:
+                    out = student_nets[i](x)
+
+                student_optims[i].zero_grad()
+                direct_dis = mse(out, target)
+                pairwise_dis = mse(torch.einsum('ik,jk->ij',
+                                                [F.normalize(out, dim=1),
+                                                 F.normalize(out, dim=1)]),
+                                   torch.einsum('ik,jk->ij',
+                                                [F.normalize(target, dim=1),
+                                                 F.normalize(target, dim=1)]))
+                loss = direct_dis + pairwise_dis
+                loss.backward()
+                student_optims[i].step()
+                current_direct_dis.append(direct_dis.item())
+                current_pairwise_dis.append(pairwise_dis.item())
+            direct_dis_list.append(np.mean(current_direct_dis))
+            pairwise_dis_list.append(np.mean(current_pairwise_dis))
+
+        if (epoch + 1) % args.disp_interval == 0:
+            print(
+                f'[INFO] Process {run_id}. Epoch [{epoch + 1}/{args.train_epochs}]: '
+                f'direct loss {np.mean(direct_dis_list):.6f}, '
+                f'pairwise loss {np.mean(pairwise_dis_list):.6f}')
+
+
+def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_training=False):
+    teacher_net.eval()
+    for i in range(args.num_students):
+        student_nets[i].eval()
+
+    direct_dis_list = []
+    pairwise_dis_list = []
+    labels = []
+    for x, y in test_loader:
+        x = x.to(device)
+
+        labels.append(y.numpy())
+
+        current_direct_dis = []
+        current_pairwise_dis = []
+        with torch.no_grad():
+            target = teacher_net(x)
+            for i in range(args.num_students):
+                if in_training and args.replaced_sampling:
+                    target = teacher_net(x[:, i, :].squeeze(1))
+                    out = student_nets[i](x[:, i, :].squeeze(1))
+                else:
+                    out = student_nets[i](x)
+                direct_dis = F.mse_loss(out, target, reduction='none').mean(dim=1)
+                pairwise_dis = F.mse_loss(torch.einsum('ik,jk->ij',
+                                                       [F.normalize(out, dim=1),
+                                                        F.normalize(out, dim=1)]),
+                                          torch.einsum('ik,jk->ij',
+                                                       [F.normalize(target, dim=1),
+                                                        F.normalize(target, dim=1)]),
+                                          reduction='none').mean(dim=1)
+                # gap = direct_dis + pairwise_dis
+                current_direct_dis.append(direct_dis.cpu().numpy().reshape(-1, 1))
+                current_pairwise_dis.append(pairwise_dis.cpu().numpy().reshape(-1, 1))
+            current_direct_dis = np.concatenate(current_direct_dis, axis=1)
+            current_pairwise_dis = np.concatenate(current_pairwise_dis, axis=1)
+        direct_dis_list.append(current_direct_dis)
+        pairwise_dis_list.append(current_pairwise_dis)
+
+    direct_dis_list = np.concatenate(direct_dis_list)
+    pairwise_dis_list = np.concatenate(pairwise_dis_list)
+    labels = np.concatenate(labels)
+
+    if in_training and args.replaced_sampling:
+        gaps = None
+        gaps_std = None
+        gaps_mean = None
+        scores = direct_dis_list + pairwise_dis_list
+    else:
+        gaps = direct_dis_list + pairwise_dis_list
+        gaps_std = np.std(gaps, axis=1)
+        gaps_mean = np.mean(gaps, axis=1)
+
+        scores = gaps_mean + args.lam * gaps_std
+
+    if not in_training:
+        print(f'[INFO] Process {run_id}.')
+        print(f'direct dis anomaly: \n{pd.DataFrame(direct_dis_list[labels == 1][:20])}')
+        print(f'direct dis nomality: \n{pd.DataFrame(direct_dis_list[labels == 0][:20])}')
+        print(f'pairwise dis anomaly: \n{pd.DataFrame(pairwise_dis_list[labels == 1][:20])}')
+        print(f'pairwise dis nomality: \n{pd.DataFrame(pairwise_dis_list[labels == 0][:20])}')
+        print(f'total dis anomaly: \n{pd.DataFrame(gaps[labels == 1][:20])}')
+        print(f'total dis nomality: \n{pd.DataFrame(gaps[labels == 0][:20])}')
+
+    return scores, gaps_std, gaps_mean, labels
+
+
+def setup_seed(seed):
+    warnings.warn(f'You have chosen to seed ({seed}) training. '
+                  f'This will turn on the CUDNN deterministic setting, '
+                  f'which can slow down your training considerably! '
+                  f'You may see unexpected behavior when restarting '
+                  f'from checkpoints.')
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+
+
+def run(run_id, args):
+    np.random.seed(args.seed + run_id)
+    torch.manual_seed(args.seed + run_id)
+
+    gpu_id = int((multiprocessing.current_process().name.split('-'))[-1]) - 1
+    device = torch.device(gpu_id)
+
+    print(f'[INFO] Process {run_id}. Running with gpu {gpu_id}...')
+    data, labels = load_data(args.data_path)
+
+    shuffle_index = np.arange(len(data))
+    np.random.shuffle(shuffle_index)
+    data, labels = data[shuffle_index], labels[shuffle_index]
+
+    train_x, test_x, train_y, test_y = train_test_split(data, labels,
+                                                        train_size=args.train_ratio)
+    # print(f'[INFO] Process {run_id}: Shape of the dataset...\n'
+    #       f'|\n'
+    #       f'|--- train_x: {train_x.shape}\n'
+    #       f'|--- train_y: {train_y.shape}\n'
+    #       f'|--- test_x:  {test_x.shape}\n'
+    #       f'|--- test_y:  {test_y.shape}')
+
+    teacher_net = TeacherNet(in_dim=train_x.shape[-1], out_dim=args.feature_dim, num_class=args.num_trans)
+    teacher_net = teacher_net.to(device)
+
+    if run_id == 0:
+        print(teacher_net)
+
+    if args.pretrain:
+        pretrain_dataset = TensorDataset(torch.from_numpy(train_x.astype(np.float32)),
+                                         torch.from_numpy(train_y.astype(np.long)))
+        pretrain_loader = DataLoader(pretrain_dataset, batch_size=args.batch_size, pin_memory=True,
+                                     shuffle=True, drop_last=True)
+        pretrain(run_id, teacher_net, pretrain_loader, device, args)
+
+    teacher_net.freeze()
+
+    if args.replaced_sampling:
+        train_x_ensemble = []
+        train_y_ensemble = []
+        for i in range(args.num_students):
+            sampling_idx = replaced_sampling(len(train_x), args.sampling_size)
+            train_x_ensemble.append(np.expand_dims(train_x[sampling_idx], axis=1))
+            train_y_ensemble.append(np.expand_dims(train_y[sampling_idx], axis=1))
+        train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
+        train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
+        train_x, train_y = train_x_ensemble, train_y_ensemble
+        print(
+            f'[INFO] Process {run_id}. Randomly sampled {args.num_students} sub-datasets with shape {train_x.shape}...')
+
+    for boost_it in range(args.boost_iter):
+        print(f'[INFO] Process {run_id}. Running boost iter {boost_it}, training size {train_x.shape}...')
+
+        train_dataset = TensorDataset(torch.from_numpy(train_x.astype(np.float32)),
+                                      torch.from_numpy(train_y.astype(np.long)))
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, pin_memory=True,
+                                  shuffle=True, drop_last=True)
+
+        student_nets = [StudentNet(in_dim=train_x.shape[-1], out_dim=args.feature_dim) for i in
+                        range(args.num_students)]
+        for i in range(args.num_students):
+            student_nets[i] = student_nets[i].to(device)
+            if run_id == 0 and i == 0 and boost_it == 0:
+                print(student_nets[i])
+
+        train(run_id, teacher_net, student_nets, train_loader, device, args)
+
+        boost_loader = DataLoader(train_dataset, batch_size=args.batch_size, pin_memory=True,
+                                  shuffle=False, drop_last=False)
+        scores, _, __, ___ = evaluate(run_id, teacher_net, student_nets, boost_loader, device, args, in_training=True)
+        if args.replaced_sampling:
+            train_x_ensemble = []
+            train_y_ensemble = []
+            for i in range(args.num_students):
+                rank_idx = np.argsort(scores[:, i].reshape(-1))
+                selected_idx = rank_idx[:int(len(rank_idx) * (1 - args.boost_ratio))]
+                train_x_ensemble.append(train_x[selected_idx, i:i + 1])
+                train_y_ensemble.append(train_y[selected_idx, i:i + 1])
+                print(f'{train_x_ensemble[-1].shape} - {train_y_ensemble[-1].shape}')
+            train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
+            train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
+            train_x, train_y = train_x_ensemble, train_y_ensemble
         else:
-            scores = first_level_scores
+            rank_idx = np.argsort(scores)
+            selected_idx = rank_idx[:int(len(rank_idx) * (1 - args.boost_ratio))]
+            train_x, train_y = train_x[selected_idx], train_y[selected_idx]
 
-        roc_auc, ap = aucPerformance(scores, y_test)
-        rocs.append(roc_auc)
-        aps.append(ap)
+    test_dataset = TensorDataset(torch.from_numpy(test_x.astype(np.float32)),
+                                 torch.from_numpy(test_y.astype(np.long)))
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, pin_memory=True,
+                             shuffle=True, drop_last=True)
 
-    print('ROC-AUC:')
-    for i, roc in enumerate(rocs):
-        print(i, '.', roc)
-    print('average: ', np.mean(rocs))
+    scores, gaps_std, gaps_mean, labels = evaluate(run_id, teacher_net, student_nets, test_loader, device, args)
+    # print('***************** Anomaly *****************')
+    # print(gaps_mean[labels == 1])
+    # print(gaps_std[labels == 1])
+    # print(f'mean: {np.mean(scores[labels==1])}')
+    # print('***************** Nomality *****************')
+    # print(gaps_mean[labels == 0][:20])
+    # print(gaps_std[labels == 0][:20])
+    # print(f'mean: {np.mean(scores[labels == 0])}')
 
-    print('PR-AUC:')
-    for i, pr in enumerate(aps):
-        print(i, '.', pr)
-    print('average: ', np.mean(aps))
+    roc = roc_auc_score(labels, scores)
+    pr = average_precision_score(labels, scores)
+
+    print(f'[INFO] Process {run_id}. ROC: {roc}, PR: {pr}, Stopped...')
+
+    return roc, pr
+
+
+if __name__ == '__main__':
+    args = parse_args()
+
+    gpu_num = args.world_size
+    pool = Pool(processes=gpu_num)
+
+    results = []
+
+    for i in range(args.num_trial):
+        result = pool.apply_async(run, (i, args))
+        results.append(result)
+    pool.close()
+    pool.join()
+
+    roc_scores = []
+    pr_scores = []
+    for result in results:
+        roc, pr = result.get()
+        roc_scores.append(roc)
+        pr_scores.append(pr)
+    print('***************** ROC *****************')
+    print(roc_scores)
+    print(f'mean: {np.mean(roc_scores)} - {np.std(roc_scores)}')
+    print('***************** PR *****************')
+    print(pr_scores)
+    print(f'mean: {np.mean(pr_scores)} - {np.std(pr_scores)}')

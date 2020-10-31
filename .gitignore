@@ -2,7 +2,7 @@
 .vscode/*
 data/*
 tests/data/*
-RDP/*
+baseline/RDP/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
