@@ -137,6 +137,7 @@ def run():
             sum_result += first_level_scores
             current_result = first_level_scores
 
+        print('************Current Result**************')
         aucPerformance(current_result, labels)
 
         print("test tree id:", i, "tic time.")
