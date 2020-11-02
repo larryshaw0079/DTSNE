@@ -9,7 +9,6 @@
 
 import argparse
 import multiprocessing
-import warnings
 from multiprocessing import Pool
 
 # import wandb
@@ -48,7 +47,9 @@ def parse_args(verbose=True):
 
     parser.add_argument('--pretrain', action='store_true')
     parser.add_argument('--replaced-sampling', action='store_true')
+    parser.add_argument('--classify-score', action='store_true')
     parser.add_argument('--sampling-size', type=int, default=None)
+    parser.add_argument('--max-grad-norm', type=float, default=None)
 
     parser.add_argument('--optim', type=str, default='sgd')
     parser.add_argument('--pretrain-lr', type=float, default=1e-3)
@@ -59,6 +60,7 @@ def parse_args(verbose=True):
     parser.add_argument('--lr', type=float, default=1e-1)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--lam', type=float, default=1.0)
+    parser.add_argument('--alpha', type=float, default=0.01)
 
     args_parsed = parser.parse_args()
 
@@ -157,6 +159,8 @@ def train(run_id, teacher_net, student_nets, train_loader, device, args):
                                                  F.normalize(target, dim=1)]))
                 loss = direct_dis + pairwise_dis
                 loss.backward()
+                if args.max_grad_norm is not None:
+                    nn.utils.clip_grad_norm_(student_nets[i].parameters(), args.max_grad_norm)
                 student_optims[i].step()
                 current_direct_dis.append(direct_dis.item())
                 current_pairwise_dis.append(pairwise_dis.item())
@@ -175,16 +179,22 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
     for i in range(args.num_students):
         student_nets[i].eval()
 
+    if args.classify_score:
+        ce_criterion = nn.CrossEntropyLoss(reduction='none')
+        classifier = teacher_net.classifier
+
     direct_dis_list = []
     pairwise_dis_list = []
+    classification_loss_list = []
     labels = []
     for x, y in test_loader:
         x = x.to(device)
-
         labels.append(y.numpy())
+        y = y.to(device)
 
         current_direct_dis = []
         current_pairwise_dis = []
+        current_classification_loss = []
         with torch.no_grad():
             target = teacher_net(x)
             for i in range(args.num_students):
@@ -201,53 +211,76 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
                                                        [F.normalize(target, dim=1),
                                                         F.normalize(target, dim=1)]),
                                           reduction='none').mean(dim=1)
+
+                if args.classify_score and not in_training:
+                    classify_out = classifier(out)
+                    ce_loss = ce_criterion(classify_out, y)
+                    current_classification_loss.append(ce_loss.cpu().numpy().reshape(-1, 1))
+
                 # gap = direct_dis + pairwise_dis
                 current_direct_dis.append(direct_dis.cpu().numpy().reshape(-1, 1))
                 current_pairwise_dis.append(pairwise_dis.cpu().numpy().reshape(-1, 1))
             current_direct_dis = np.concatenate(current_direct_dis, axis=1)
             current_pairwise_dis = np.concatenate(current_pairwise_dis, axis=1)
+            if args.classify_score and not in_training:
+                current_classification_loss = np.concatenate(current_classification_loss, axis=1)
         direct_dis_list.append(current_direct_dis)
         pairwise_dis_list.append(current_pairwise_dis)
+        if args.classify_score and not in_training:
+            classification_loss_list.append(current_classification_loss)
 
-    direct_dis_list = np.concatenate(direct_dis_list)
-    pairwise_dis_list = np.concatenate(pairwise_dis_list)
+    direct_dis_list = np.concatenate(direct_dis_list)  # (num_sample, num_student)
+    pairwise_dis_list = np.concatenate(pairwise_dis_list)  # (num_sample, num_student)
+    if args.classify_score and not in_training:
+        classification_loss_list = np.concatenate(classification_loss_list)
     labels = np.concatenate(labels)
 
-    if in_training and args.replaced_sampling:
-        gaps = None
-        gaps_std = None
-        gaps_mean = None
-        scores = direct_dis_list + pairwise_dis_list
-    else:
-        gaps = direct_dis_list + pairwise_dis_list
-        gaps_std = np.std(gaps, axis=1)
-        gaps_mean = np.mean(gaps, axis=1)
+    if in_training:
+        if args.replaced_sampling:
+            gaps = None
+            gaps_std = None
+            gaps_mean = None
+            scores = direct_dis_list + pairwise_dis_list
+        else:
+            gaps = direct_dis_list + pairwise_dis_list
+            gaps_std = np.std(gaps, axis=1)
+            gaps_mean = np.mean(gaps, axis=1)
 
-        scores = gaps_mean + args.lam * gaps_std
+            scores = gaps_mean + args.lam * gaps_std
+    else:
+        if args.classify_score:
+            gaps = direct_dis_list + pairwise_dis_list + args.alpha * classification_loss_list
+            gaps_std = np.std(gaps, axis=1)
+            gaps_mean = np.mean(gaps, axis=1)
+
+            scores = gaps_mean + args.lam * gaps_std
+        else:
+            gaps = direct_dis_list + pairwise_dis_list
+            gaps_std = np.std(gaps, axis=1)
+            gaps_mean = np.mean(gaps, axis=1)
+
+            scores = gaps_mean + args.lam * gaps_std
 
     if not in_training:
+        direct_dis_anomaly = pd.DataFrame(direct_dis_list[labels == 1][:20])
+        direct_dis_nomality = pd.DataFrame(direct_dis_list[labels == 0][:20])
+        pairwise_dis_anomaly = pd.DataFrame(pairwise_dis_list[labels == 1][:20])
+        pairwise_dis_nomality = pd.DataFrame(pairwise_dis_list[labels == 0][:20])
+
         print(f'[INFO] Process {run_id}.')
-        print(f'direct dis anomaly: \n{pd.DataFrame(direct_dis_list[labels == 1][:20])}')
-        print(f'direct dis nomality: \n{pd.DataFrame(direct_dis_list[labels == 0][:20])}')
-        print(f'pairwise dis anomaly: \n{pd.DataFrame(pairwise_dis_list[labels == 1][:20])}')
-        print(f'pairwise dis nomality: \n{pd.DataFrame(pairwise_dis_list[labels == 0][:20])}')
-        print(f'total dis anomaly: \n{pd.DataFrame(gaps[labels == 1][:20])}')
-        print(f'total dis nomality: \n{pd.DataFrame(gaps[labels == 0][:20])}')
+        print(f'direct dis anomaly: \n{direct_dis_anomaly}')
+        print(f'direct dis nomality: \n{direct_dis_nomality}')
+        print(f'pairwise dis anomaly: \n{pairwise_dis_anomaly}')
+        print(f'pairwise dis nomality: \n{pairwise_dis_nomality}')
+        if args.classify_score:
+            classify_loss_anomaly = pd.DataFrame(classification_loss_list[labels == 1][:20])
+            classify_loss_nomality = pd.DataFrame(classification_loss_list[labels == 0][:20])
+            print(f'classify loss anomaly: \n{classify_loss_anomaly}')
+            print(f'classify loss nomality: \n{classify_loss_nomality}')
+        print(f'gaps anomaly: \n{pd.DataFrame(gaps[labels == 1][:20])}')
+        print(f'gaps nomality: \n{pd.DataFrame(gaps[labels == 0][:20])}')
 
     return scores, gaps_std, gaps_mean, labels
-
-
-def setup_seed(seed):
-    warnings.warn(f'You have chosen to seed ({seed}) training. '
-                  f'This will turn on the CUDNN deterministic setting, '
-                  f'which can slow down your training considerably! '
-                  f'You may see unexpected behavior when restarting '
-                  f'from checkpoints.')
-
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    torch.backends.cudnn.deterministic = True
 
 
 def run(run_id, args):
@@ -266,12 +299,6 @@ def run(run_id, args):
 
     train_x, test_x, train_y, test_y = train_test_split(data, labels,
                                                         train_size=args.train_ratio)
-    # print(f'[INFO] Process {run_id}: Shape of the dataset...\n'
-    #       f'|\n'
-    #       f'|--- train_x: {train_x.shape}\n'
-    #       f'|--- train_y: {train_y.shape}\n'
-    #       f'|--- test_x:  {test_x.shape}\n'
-    #       f'|--- test_y:  {test_y.shape}')
 
     teacher_net = TeacherNet(in_dim=train_x.shape[-1], out_dim=args.feature_dim, num_class=args.num_trans)
     teacher_net = teacher_net.to(device)
@@ -298,8 +325,8 @@ def run(run_id, args):
         train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
         train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
         train_x, train_y = train_x_ensemble, train_y_ensemble
-        print(
-            f'[INFO] Process {run_id}. Randomly sampled {args.num_students} sub-datasets with shape {train_x.shape}...')
+        print(f'[INFO] Process {run_id}. '
+              f'Randomly sampled {args.num_students} sub-datasets with shape {train_x.shape}...')
 
     for boost_it in range(args.boost_iter):
         print(f'[INFO] Process {run_id}. Running boost iter {boost_it}, training size {train_x.shape}...')
@@ -329,7 +356,6 @@ def run(run_id, args):
                 selected_idx = rank_idx[:int(len(rank_idx) * (1 - args.boost_ratio))]
                 train_x_ensemble.append(train_x[selected_idx, i:i + 1])
                 train_y_ensemble.append(train_y[selected_idx, i:i + 1])
-                print(f'{train_x_ensemble[-1].shape} - {train_y_ensemble[-1].shape}')
             train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
             train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
             train_x, train_y = train_x_ensemble, train_y_ensemble
