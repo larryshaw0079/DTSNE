@@ -26,10 +26,9 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from dtsne.backbone import TeacherNet, StudentNet
 from dtsne.dataset import load_data, BatchTransformation
-from dtsne.util import replaced_sampling
 
 
-# from torch.utils.tensorboard import SummaryWriter
+# from dtsne.util import replaced_sampling
 
 
 def parse_args(verbose=True):
@@ -49,7 +48,6 @@ def parse_args(verbose=True):
     parser.add_argument('--feature-dim', type=int, default=32)
 
     parser.add_argument('--pretrain', action='store_true')
-    parser.add_argument('--replaced-sampling', action='store_true')
     parser.add_argument('--classify-score', action='store_true')
     parser.add_argument('--sampling-size', type=int, default=None)
     parser.add_argument('--max-grad-norm', type=float, default=None)
@@ -145,12 +143,12 @@ def train(run_id, teacher_net, student_nets, train_loader, device, args):
             current_direct_dis = []
             current_pairwise_dis = []
             for i in range(args.num_students):
-                if args.replaced_sampling:
-                    with torch.no_grad():
-                        target = teacher_net(x[:, i, :].squeeze(1))
-                    out = student_nets[i](x[:, i, :].squeeze(1))
-                else:
-                    out = student_nets[i](x)
+                # if args.replaced_sampling:
+                #     with torch.no_grad():
+                #         target = teacher_net(x[:, i, :].squeeze(1))
+                #     out = student_nets[i](x[:, i, :].squeeze(1))
+                # else:
+                out = student_nets[i](x)
 
                 student_optims[i].zero_grad()
                 direct_dis = mse(out, target)
@@ -201,11 +199,11 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
         with torch.no_grad():
             target = teacher_net(x)
             for i in range(args.num_students):
-                if in_training and args.replaced_sampling:
-                    target = teacher_net(x[:, i, :].squeeze(1))
-                    out = student_nets[i](x[:, i, :].squeeze(1))
-                else:
-                    out = student_nets[i](x)
+                # if in_training and args.replaced_sampling:
+                #     target = teacher_net(x[:, i, :].squeeze(1))
+                #     out = student_nets[i](x[:, i, :].squeeze(1))
+                # else:
+                out = student_nets[i](x)
                 direct_dis = F.mse_loss(out, target, reduction='none').mean(dim=1)
                 pairwise_dis = F.mse_loss(torch.einsum('ik,jk->ij',
                                                        [F.normalize(out, dim=1),
@@ -239,17 +237,17 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
     labels = np.concatenate(labels)
 
     if in_training:
-        if args.replaced_sampling:
-            gaps = None
-            gaps_std = None
-            gaps_mean = None
-            scores = direct_dis_list + pairwise_dis_list
-        else:
-            gaps = direct_dis_list + pairwise_dis_list
-            gaps_std = np.std(gaps, axis=1)
-            gaps_mean = np.mean(gaps, axis=1)
+        # if args.replaced_sampling:
+        #     gaps = None
+        #     gaps_std = None
+        #     gaps_mean = None
+        #     scores = direct_dis_list + pairwise_dis_list
+        # else:
+        gaps = direct_dis_list + pairwise_dis_list
+        gaps_std = np.std(gaps, axis=1)
+        gaps_mean = np.mean(gaps, axis=1)
 
-            scores = gaps_mean + args.lam * gaps_std
+        scores = gaps_mean + args.lam * gaps_std
     else:
         if args.classify_score:
             gaps = direct_dis_list + pairwise_dis_list + args.alpha * classification_loss_list
@@ -318,18 +316,18 @@ def run(run_id, args):
 
     teacher_net.freeze()
 
-    if args.replaced_sampling:
-        train_x_ensemble = []
-        train_y_ensemble = []
-        for i in range(args.num_students):
-            sampling_idx = replaced_sampling(len(train_x), args.sampling_size)
-            train_x_ensemble.append(np.expand_dims(train_x[sampling_idx], axis=1))
-            train_y_ensemble.append(np.expand_dims(train_y[sampling_idx], axis=1))
-        train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
-        train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
-        train_x, train_y = train_x_ensemble, train_y_ensemble
-        print(f'[INFO] Process {run_id}. '
-              f'Randomly sampled {args.num_students} sub-datasets with shape {train_x.shape}...')
+    # if args.replaced_sampling:
+    #     train_x_ensemble = []
+    #     train_y_ensemble = []
+    #     for i in range(args.num_students):
+    #         sampling_idx = replaced_sampling(len(train_x), args.sampling_size)
+    #         train_x_ensemble.append(np.expand_dims(train_x[sampling_idx], axis=1))
+    #         train_y_ensemble.append(np.expand_dims(train_y[sampling_idx], axis=1))
+    #     train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
+    #     train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
+    #     train_x, train_y = train_x_ensemble, train_y_ensemble
+    #     print(f'[INFO] Process {run_id}. '
+    #           f'Randomly sampled {args.num_students} sub-datasets with shape {train_x.shape}...')
 
     for boost_it in range(args.boost_iter):
         print(f'[INFO] Process {run_id}. Running boost iter {boost_it}, training size {train_x.shape}...')
@@ -351,21 +349,21 @@ def run(run_id, args):
         boost_loader = DataLoader(train_dataset, batch_size=args.batch_size, pin_memory=True,
                                   shuffle=False, drop_last=False)
         scores, _, __, ___ = evaluate(run_id, teacher_net, student_nets, boost_loader, device, args, in_training=True)
-        if args.replaced_sampling:
-            train_x_ensemble = []
-            train_y_ensemble = []
-            for i in range(args.num_students):
-                rank_idx = np.argsort(scores[:, i].reshape(-1))
-                selected_idx = rank_idx[:int(len(rank_idx) * (1 - args.boost_ratio))]
-                train_x_ensemble.append(train_x[selected_idx, i:i + 1])
-                train_y_ensemble.append(train_y[selected_idx, i:i + 1])
-            train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
-            train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
-            train_x, train_y = train_x_ensemble, train_y_ensemble
-        else:
-            rank_idx = np.argsort(scores)
-            selected_idx = rank_idx[:int(len(rank_idx) * (1 - args.boost_ratio))]
-            train_x, train_y = train_x[selected_idx], train_y[selected_idx]
+        # if args.replaced_sampling:
+        #     train_x_ensemble = []
+        #     train_y_ensemble = []
+        #     for i in range(args.num_students):
+        #         rank_idx = np.argsort(scores[:, i].reshape(-1))
+        #         selected_idx = rank_idx[:int(len(rank_idx) * (1 - args.boost_ratio))]
+        #         train_x_ensemble.append(train_x[selected_idx, i:i + 1])
+        #         train_y_ensemble.append(train_y[selected_idx, i:i + 1])
+        #     train_x_ensemble = np.concatenate(train_x_ensemble, axis=1)
+        #     train_y_ensemble = np.concatenate(train_y_ensemble, axis=1)
+        #     train_x, train_y = train_x_ensemble, train_y_ensemble
+        # else:
+        rank_idx = np.argsort(scores)
+        selected_idx = rank_idx[:int(len(rank_idx) * (1 - args.boost_ratio))]
+        train_x, train_y = train_x[selected_idx], train_y[selected_idx]
 
     test_dataset = TensorDataset(torch.from_numpy(test_x.astype(np.float32)),
                                  torch.from_numpy(test_y.astype(np.long)))
