@@ -9,6 +9,8 @@
 
 import argparse
 import multiprocessing
+import os
+import warnings
 from multiprocessing import Pool
 
 # import wandb
@@ -34,6 +36,7 @@ def parse_args(verbose=True):
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--data-path', type=str, default='./data/apascal.csv')
+    parser.add_argument('--save-path', type=str, default='./cache')
     parser.add_argument('--world-size', type=int, default=4)
     parser.add_argument('--seed', type=int, default=2020)
     parser.add_argument('--num-students', type=int, default=8)
@@ -389,6 +392,10 @@ def run(run_id, args):
 
 if __name__ == '__main__':
     args = parse_args()
+
+    if not os.path.exists(args.save_path):
+        warnings.warn(f'The save path {args.save_path} dost not exist, created.')
+        os.makedirs(args.save_path)
 
     gpu_num = args.world_size
     pool = Pool(processes=gpu_num)
