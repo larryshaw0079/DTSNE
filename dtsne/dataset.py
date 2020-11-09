@@ -49,5 +49,5 @@ class BatchTransformation:
         out = out.reshape(-1, out.size(2))
         out = out.contiguous()
 
-        # out: (batch, num_trans, output_size)
+        # out: (batch*num_trans, output_size)
         return out, y.reshape(-1)
