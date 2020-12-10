@@ -87,7 +87,6 @@ def pretrain(run_id, teacher_net, train_loader, device, args):
     else:
         raise ValueError
     transformer = BatchTransformation(input_size=train_loader.dataset[0][0].size(-1),
-                                      output_size=train_loader.dataset[0][0].size(-1),
                                       batch_size=args.batch_size, num_trans=args.num_trans,
                                       bias=False, device=device)
     criterion = nn.CrossEntropyLoss()
@@ -177,7 +176,6 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
     if args.classify_score != 'none':
         classifier = teacher_net.classifier
         transformer = BatchTransformation(input_size=test_loader.dataset[0][0].size(-1),
-                                          output_size=test_loader.dataset[0][0].size(-1),
                                           batch_size=args.batch_size, num_trans=args.num_trans,
                                           bias=False, device=device)
 
@@ -218,6 +216,7 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
         classify_labels = []
         for x, y in test_loader:
             x = x.to(device)
+            batch_size, *_ = x.shape
             x, y = transformer(x)
 
             classify_out_list = []
@@ -225,11 +224,11 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
                 for i in range(args.num_students):
                     out = student_nets[i](x)
                     classify_out = classifier(out)  # (batch*num_trans, num_class)
-                    classify_out = classify_out.view(args.batch_size, args.num_trans, args.num_trans)
+                    classify_out = classify_out.view(batch_size, args.num_trans, args.num_trans)
                     classify_out_list.append(classify_out)
 
             classify_out_list = torch.stack(classify_out_list, dim=1)  # (batch, num_students, num_trans, num_class)
-            y = y.view(args.batch_size, args.num_trans)
+            y = y.view(batch_size, args.num_trans)
 
             classify_preds.append(classify_out_list)
             classify_labels.append(y)
@@ -324,6 +323,10 @@ def run(run_id, args):
 
     train_x, test_x, train_y, test_y = train_test_split(data, labels,
                                                         train_size=args.train_ratio)
+    while np.count_nonzero(test_y) == 0:
+        warnings.warn('No anomalies contained in the test dataset, resampling...')
+        train_x, test_x, train_y, test_y = train_test_split(data, labels,
+                                                            train_size=args.train_ratio)
 
     teacher_net = TeacherNet(in_dim=train_x.shape[-1], out_dim=args.feature_dim, num_class=args.num_trans)
     teacher_net = teacher_net.to(device)
@@ -387,7 +390,7 @@ def run(run_id, args):
     test_dataset = TensorDataset(torch.from_numpy(test_x.astype(np.float32)),
                                  torch.from_numpy(test_y.astype(np.long)))
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, pin_memory=True,
-                             shuffle=True, drop_last=True)
+                             shuffle=True, drop_last=False)
 
     scores, gaps_std, gaps_mean, labels = evaluate(run_id, teacher_net, student_nets, test_loader, device, args)
 
