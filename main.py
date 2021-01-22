@@ -58,7 +58,6 @@ def parse_args(verbose=True):
     parser.add_argument('--disp-interval', type=int, default=20)
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-1)
-    parser.add_argument('--wd', type=float, default=1e-3)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--lam', type=float, default=1.0)
     parser.add_argument('--alpha', type=float, default=0.01)
@@ -82,10 +81,9 @@ def parse_args(verbose=True):
 
 def pretrain(run_id, teacher_net, train_loader, device, args):
     if args.optim == 'adam':
-        teacher_optim = optim.Adam(teacher_net.parameters(), lr=args.pretrain_lr, weight_decay=args.wd)
+        teacher_optim = optim.Adam(teacher_net.parameters(), lr=args.pretrain_lr)
     elif args.optim == 'sgd':
-        teacher_optim = optim.SGD(teacher_net.parameters(), lr=args.pretrain_lr,
-                                  weight_decay=args.wd, momentum=args.momentum)
+        teacher_optim = optim.SGD(teacher_net.parameters(), lr=args.pretrain_lr, momentum=args.momentum)
     else:
         raise ValueError
     transformer = BatchTransformation(input_size=train_loader.dataset[0][0].size(-1),
@@ -118,9 +116,9 @@ def train(run_id, teacher_net, student_nets, train_loader, device, args):
     student_optims = []
     for i in range(args.num_students):
         if args.optim == 'adam':
-            student_optims.append(optim.Adam(student_nets[i].parameters(), lr=args.lr, weight_decay=args.wd))
+            student_optims.append(optim.Adam(student_nets[i].parameters(), lr=args.lr))
         elif args.optim == 'sgd':
-            student_optims.append(optim.SGD(student_nets[i].parameters(), lr=args.lr, weight_decay=args.wd,
+            student_optims.append(optim.SGD(student_nets[i].parameters(), lr=args.lr,
                                             momentum=args.momentum))
         else:
             raise ValueError

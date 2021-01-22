@@ -3,6 +3,7 @@
 data/*
 tests/data/*
 baseline/RDP/*
+baseline/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
