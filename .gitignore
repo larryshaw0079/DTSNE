@@ -4,6 +4,7 @@ data/*
 tests/data/*
 baseline/RDP/*
 baseline/*
+main_pyod.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

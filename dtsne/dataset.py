@@ -12,10 +12,10 @@ import pandas as pd
 import torch
 
 
-def load_data(data_path):
+def load_data(data_path, label_name='class'):
     df = pd.read_csv(data_path)
-    labels = df['class'].values
-    x_df = df.drop(['class'], axis=1)
+    labels = df[label_name].values
+    x_df = df.drop([label_name], axis=1)
     x = x_df.values
 
     return x, labels

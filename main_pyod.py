@@ -13,23 +13,29 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from pyod.models.auto_encoder import AutoEncoder
+from pyod.models.abod import ABOD
+# from pyod.models.auto_encoder import AutoEncoder
 from pyod.models.copod import COPOD
 from pyod.models.loda import LODA
 from pyod.models.lof import LOF
 from pyod.models.lscp import LSCP
+from pyod.models.mcd import MCD
 from pyod.models.ocsvm import OCSVM
+from pyod.models.pca import PCA
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.model_selection import train_test_split
 
 from dtsne.dataset import load_data
 
 ALL_ALGORITHMS = [
-    'LSCP',
-    'AE',
-    'COPOD',
+    # 'LSCP',
+    # 'AE',
     'OCSVM',
-    'LODA'
+    # 'LODA',
+    # 'ABOD',
+    'PCA',
+    # 'MCD',
+    'COPOD',
 ]
 ALL_DATASETS = [
     'ad.csv',
@@ -103,19 +109,25 @@ def run(run_id, algo, dataset, args):
         clf = LSCP([LOF(), LOF()])
     elif algo == 'LODA':
         clf = LODA()
-    elif algo == 'AE':
-        if len(train_x) < 200:
-            batch = 16
-        elif len(train_x) < 1000:
-            batch = 128
-        elif len(train_x) < 5000:
-            batch = 256
-        elif len(train_x) < 10000:
-            batch = 512
-        else:
-            batch = 1024
-        clf = AutoEncoder(hidden_neurons=[train_x.shape[1] // 2, train_x.shape[1] // 4, train_x.shape[1] // 2],
-                          batch_size=batch, epochs=50, optimizer='sgd', verbose=0)
+    elif algo == 'ABOD':
+        clf = ABOD()
+    elif algo == 'PCA':
+        clf = PCA()
+    elif algo == 'MCD':
+        clf = MCD()
+    # elif algo == 'AE':
+    #     if len(train_x) < 200:
+    #         batch = 16
+    #     elif len(train_x) < 1000:
+    #         batch = 128
+    #     elif len(train_x) < 5000:
+    #         batch = 256
+    #     elif len(train_x) < 10000:
+    #         batch = 512
+    #     else:
+    #         batch = 1024
+    #     clf = AutoEncoder(hidden_neurons=[train_x.shape[1] // 2, train_x.shape[1] // 4, train_x.shape[1] // 2],
+    #                       batch_size=batch, epochs=50, optimizer='sgd', verbose=0)
     else:
         raise ValueError
 
@@ -123,8 +135,17 @@ def run(run_id, algo, dataset, args):
     pred_y = clf.decision_function(test_x)
     # pred_y = clf.predict_proba(test_x, method='linear')[:, 1]
 
-    roc = roc_auc_score(test_y, pred_y)
-    pr = average_precision_score(test_y, pred_y)
+    try:
+        roc = roc_auc_score(test_y, pred_y)
+    except ValueError as e:
+        roc = np.nan
+        print(e)
+
+    try:
+        pr = average_precision_score(test_y, pred_y)
+    except ValueError as e:
+        pr = np.nan
+        print(e)
 
     return roc, pr
 
@@ -159,10 +180,10 @@ if __name__ == '__main__':
             print(f'Time elapsed: {ed - st} s.')
             print('***************** ROC *****************')
             print(roc_scores)
-            print(f'mean: {np.mean(roc_scores)} - {np.std(roc_scores)}')
+            print(f'mean: {np.nanmean(roc_scores)} - {np.nanstd(roc_scores)}')
             print('***************** PR *****************')
             print(pr_scores)
-            print(f'mean: {np.mean(pr_scores)} - {np.std(pr_scores)}')
+            print(f'mean: {np.nanmean(pr_scores)} - {np.nanstd(pr_scores)}')
 
             mean_roc.loc[dataset, algo] = np.mean(roc_scores)
             std_roc.loc[dataset, algo] = np.std(roc_scores)

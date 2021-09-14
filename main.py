@@ -11,6 +11,7 @@ import argparse
 import itertools
 import multiprocessing
 import os
+import random
 import warnings
 from multiprocessing import Pool
 
@@ -22,10 +23,23 @@ import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import TensorDataset, DataLoader
 
 from dtsne.backbone import TeacherNet, StudentNet
 from dtsne.dataset import load_data, BatchTransformation
+
+
+def setup_seed(seed):
+    warnings.warn(f'You have chosen to seed ({seed}) training. This will turn on the CUDNN deterministic setting, '
+                  f'which can slow down your training considerably! You may see unexpected behavior when restarting '
+                  f'from checkpoints.')
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
 
 
 def parse_args(verbose=True):
@@ -33,6 +47,8 @@ def parse_args(verbose=True):
 
     parser.add_argument('--data-path', type=str, default='./data/apascal.csv')
     parser.add_argument('--save-path', type=str, default='./cache')
+    parser.add_argument('--label-name', type=str, default='class')
+    parser.add_argument('--preprocessing', type=str, default='standard', choices=['minmax', 'standard', 'none'])
     parser.add_argument('--only-evaluate', action='store_true')
     parser.add_argument('--world-size', type=int, default=4)
     parser.add_argument('--seed', type=int, default=2020)
@@ -59,8 +75,9 @@ def parse_args(verbose=True):
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-1)
     parser.add_argument('--momentum', type=float, default=0.9)
-    parser.add_argument('--lam', type=float, default=1.0)
-    parser.add_argument('--alpha', type=float, default=0.01)
+    parser.add_argument('--lam', type=float, default=0.01, help='factor to use extra anomaly scores')
+    parser.add_argument('--alpha', type=float, default=1, help='dis pairwise')
+    parser.add_argument('--beta', type=float, default=1, help='mean std')
 
     args_parsed = parser.parse_args()
 
@@ -266,24 +283,24 @@ def evaluate(run_id, teacher_net, student_nets, test_loader, device, args, in_tr
     labels = np.concatenate(labels)
 
     if in_training:
-        gaps = direct_dis_list + pairwise_dis_list
+        gaps = direct_dis_list + args.alpha * pairwise_dis_list
         gaps_std = np.std(gaps, axis=1)
         gaps_mean = np.mean(gaps, axis=1)
 
-        scores = gaps_mean + args.lam * gaps_std
+        scores = gaps_mean + args.beta * gaps_std
     else:
         if args.classify_score != 'none':
-            gaps = direct_dis_list + pairwise_dis_list + args.alpha * classify_scores
+            gaps = direct_dis_list + args.alpha * pairwise_dis_list + args.lam * classify_scores
             gaps_std = np.std(gaps, axis=1)
             gaps_mean = np.mean(gaps, axis=1)
 
-            scores = gaps_mean + args.lam * gaps_std
+            scores = gaps_mean + args.beta * gaps_std
         else:
-            gaps = direct_dis_list + pairwise_dis_list
+            gaps = direct_dis_list + args.alpha * pairwise_dis_list
             gaps_std = np.std(gaps, axis=1)
             gaps_mean = np.mean(gaps, axis=1)
 
-            scores = gaps_mean + args.lam * gaps_std
+            scores = gaps_mean + args.beta * gaps_std
 
     if not in_training:
         direct_dis_anomaly = pd.DataFrame(direct_dis_list[labels == 1][:20])
@@ -311,22 +328,38 @@ def run(run_id, args):
     np.random.seed(args.seed + run_id)
     torch.manual_seed(args.seed + run_id)
 
+    # setup_seed(args.seed + run_id)
+
     gpu_id = int((multiprocessing.current_process().name.split('-'))[-1]) - 1
     device = torch.device(gpu_id)
 
     print(f'[INFO] Process {run_id}. Running with gpu {gpu_id}...')
-    data, labels = load_data(args.data_path)
+    data, labels = load_data(args.data_path, args.label_name)
 
     shuffle_index = np.arange(len(data))
     np.random.shuffle(shuffle_index)
     data, labels = data[shuffle_index], labels[shuffle_index]
 
-    train_x, test_x, train_y, test_y = train_test_split(data, labels,
-                                                        train_size=args.train_ratio)
+    train_x, test_x, train_y, test_y = train_test_split(data, labels, train_size=args.train_ratio)
+    # train_x, test_x, train_y, test_y = train_test_split(data, labels, train_size=args.train_ratio, shuffle=False,
+    #                                                     random_state=args.seed+run_id)
     while np.count_nonzero(test_y) == 0:
         warnings.warn('No anomalies contained in the test dataset, resampling...')
-        train_x, test_x, train_y, test_y = train_test_split(data, labels,
-                                                            train_size=args.train_ratio)
+        train_x, test_x, train_y, test_y = train_test_split(data, labels, train_size=args.train_ratio)
+        # train_x, test_x, train_y, test_y = train_test_split(data, labels, train_size=args.train_ratio, shuffle=False,
+        #                                         random_state=args.seed + run_id)
+
+    if args.preprocessing == 'standard':
+        train_mean = np.mean(train_x, axis=0)
+        train_std = np.std(train_x, axis=0)
+        train_x = (train_x - train_mean) / train_std
+        test_x = (test_x - train_mean) / train_std
+    elif args.preprocessing == 'minmax':
+        scaler = MinMaxScaler()
+        train_x = scaler.fit_transform(train_x)
+        test_x = scaler.fit_transform(test_x)
+    else:
+        pass
 
     teacher_net = TeacherNet(in_dim=train_x.shape[-1], out_dim=args.feature_dim, num_class=args.num_trans)
     teacher_net = teacher_net.to(device)
