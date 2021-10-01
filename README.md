@@ -10,11 +10,15 @@ Full text: https://www.mdpi.com/1099-4300/23/2/201/htm
 
 # Usage
 
-Basic usage:
+A typical command that performs 10 independent runs would be:
 
-`python main.py --data-path <data_path> `
+`python main.py --data-path <your-data-path> --preprocessing minmax --seed 2020 --num-students 8 --num-trans 32 --num-trial 10 --pretrain --classify-score cp --batch-size 128`
+
+To see more options, please type `python main.py -h`.
 
 # Citation
+
+If you find our paper is helpful for your research, please cite this paper:
 
 ```
 @Article{e23020201,
